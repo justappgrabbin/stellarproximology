@@ -1,0 +1,6 @@
+# Populated from the four unmodified GitHub archive parts during Actions builds.
+app/src/main/assets/web/
+.gradle/
+**/build/
+local.properties
+*.apk

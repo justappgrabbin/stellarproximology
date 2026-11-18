@@ -1,0 +1,104 @@
+name: Unpack original Stellar Proximology ZIP and build Android APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-android-apk.yml'
+      - 'Stellar-Proximology-FULL-web.zip.part*'
+      - 'android/**'
+
+permissions:
+  contents: read
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - name: Checkout unmodified archive parts and Android wrapper
+        uses: actions/checkout@v4
+
+      - name: Rejoin four parts and verify original SHA-256
+        shell: bash
+        run: |
+          set -euo pipefail
+          for i in 01 02 03 04; do
+            test -s "Stellar-Proximology-FULL-web.zip.part${i}"
+          done
+          cat Stellar-Proximology-FULL-web.zip.part01 \
+              Stellar-Proximology-FULL-web.zip.part02 \
+              Stellar-Proximology-FULL-web.zip.part03 \
+              Stellar-Proximology-FULL-web.zip.part04 \
+              > "$RUNNER_TEMP/Stellar-Proximology-FULL-web.zip"
+          printf '%s  %s\n' '503f7ca959767d531b528b89ac21b7761afa8fba1c6e1ffb9e3c41835df4a0aa' "$RUNNER_TEMP/Stellar-Proximology-FULL-web.zip" | sha256sum -c -
+
+      - name: Unzip intact original assets into Android package
+        shell: bash
+        run: |
+          set -euo pipefail
+          export SOURCE_ZIP="$RUNNER_TEMP/Stellar-Proximology-FULL-web.zip"
+          export EXTRACT_DIR="$RUNNER_TEMP/unpacked"
+          python3 - <<'PY'
+          import os
+          from pathlib import Path, PurePosixPath
+          from zipfile import ZipFile
+          source = Path(os.environ['SOURCE_ZIP'])
+          dest = Path(os.environ['EXTRACT_DIR'])
+          with ZipFile(source, 'r') as archive:
+              bad = archive.testzip()
+              if bad:
+                  raise RuntimeError(f'ZIP CRC failed: {bad}')
+              for item in archive.infolist():
+                  path = PurePosixPath(item.filename)
+                  if (path.is_absolute() or '..' in path.parts or
+                      not item.filename.startswith('assets/web/')):
+                      raise RuntimeError(f'Unexpected archive path: {item.filename}')
+              archive.extractall(dest)
+          web = dest / 'assets' / 'web'
+          for required in ('index.html','stellar.mjs','stellar.css','manifest.webmanifest'):
+              if not (web / required).is_file():
+                  raise RuntimeError(f'Missing required app file: {required}')
+          print('Original archive fully extracted and CRC-checked:', web)
+          PY
+          mkdir -p android/app/src/main/assets
+          cp -a "$EXTRACT_DIR/assets/web" android/app/src/main/assets/web
+          test -s android/app/src/main/assets/web/index.html
+          echo "Extracted files: $(find android/app/src/main/assets/web -type f | wc -l)"
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install required Android platform
+        run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
+
+      - name: Set up compatible Gradle 8.11.1
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.11.1'
+
+      - name: Build installable debug APK
+        run: gradle --no-daemon --stacktrace -p android :app:assembleDebug
+
+      - name: Verify built APK exists
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s android/app/build/outputs/apk/debug/app-debug.apk
+          unzip -tq android/app/build/outputs/apk/debug/app-debug.apk >/dev/null
+          sha256sum android/app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Publish downloadable Android APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Stellar-Proximology-Android-APK
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 30
