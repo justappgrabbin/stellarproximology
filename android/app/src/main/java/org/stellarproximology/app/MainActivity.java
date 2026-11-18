@@ -1,6 +1,18 @@
 package org.stellarproximology.app;
 
 import android.app.Activity;
+import android.app.AlertDialog;
+import android.view.Gravity;
+import android.view.ViewGroup;
+import android.widget.Button;
+import android.widget.LinearLayout;
+import android.widget.TextView;
+import android.util.TypedValue;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.Enumeration;
+import java.util.List;
 import android.content.Intent;
 import android.graphics.Color;
 import android.net.Uri;
@@ -38,6 +50,8 @@ public class MainActivity extends Activity {
     private volatile ZipFile archive;
     private WebView webView;
     private ValueCallback<Uri[]> pendingFiles;
+    private Button catalogButton;
+    private final List<String> catalogPaths = new ArrayList<>();
 
     @Override
     public void onCreate(Bundle state) {
@@ -91,14 +105,44 @@ public class MainActivity extends Activity {
                 }
             }
         });
-        setContentView(webView);
+        // The native Explore control exposes every original HTML entry point.
+        // Source code and the original archived site remain byte-for-byte intact.
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setBackgroundColor(Color.rgb(8, 7, 11));
+        LinearLayout toolbar = new LinearLayout(this);
+        toolbar.setGravity(Gravity.CENTER_VERTICAL);
+        toolbar.setPadding(dp(12), dp(3), dp(8), dp(3));
+        TextView appTitle = new TextView(this);
+        appTitle.setText("STELLAR PROXIMOLOGY");
+        appTitle.setTextColor(Color.WHITE);
+        appTitle.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        appTitle.setLetterSpacing(0.05f);
+        toolbar.addView(appTitle, new LinearLayout.LayoutParams(0,
+            ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        catalogButton = new Button(this);
+        catalogButton.setText("Explore");
+        catalogButton.setAllCaps(false);
+        catalogButton.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        catalogButton.setOnClickListener(v -> showCatalog());
+        toolbar.addView(catalogButton, new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT, dp(44)));
+        root.addView(toolbar, new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, dp(50)));
+        root.addView(webView, new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+        setContentView(root);
 
         // Opening the original ZIP on a worker thread avoids blocking the app UI.
         new Thread(() -> {
             try {
                 ZipFile opened = prepareArchive();
+                List<String> discovered = discoverPages(opened);
                 archive = opened;
                 runOnUiThread(() -> {
+                    catalogPaths.clear();
+                    catalogPaths.addAll(discovered);
+                    catalogButton.setText("Explore " + discovered.size());
                     if (isFinishing() || isDestroyed()) return;
                     if (state != null && webView.restoreState(state) != null) return;
                     webView.loadUrl(START_URL);
@@ -113,6 +157,77 @@ public class MainActivity extends Activity {
                 });
             }
         }, "StellarArchiveBootstrap").start();
+    }
+
+    private int dp(int value) {
+        return (int) (value * getResources().getDisplayMetrics().density + 0.5f);
+    }
+
+    private List<String> discoverPages(ZipFile source) {
+        List<String> paths = new ArrayList<>();
+        Enumeration<? extends ZipEntry> entries = source.entries();
+        while (entries.hasMoreElements()) {
+            ZipEntry entry = entries.nextElement();
+            String path = entry.getName();
+            if (!entry.isDirectory() && path.startsWith("assets/web/") &&
+                path.toLowerCase(Locale.ROOT).endsWith(".html")) {
+                paths.add(path.substring("assets/".length()));
+            }
+        }
+        Collections.sort(paths, Comparator.comparingInt(this::pagePriority)
+            .thenComparing(String::compareTo));
+        return paths;
+    }
+
+    private int pagePriority(String path) {
+        if (path.equals("web/index.html")) return 0;
+        if (path.equals("web/legacy-shell.html")) return 1;
+        if (path.equals("web/suite/index.html")) return 2;
+        if (path.equals("web/synthia-runtime.html")) return 3;
+        if (path.endsWith("synthia-sovereign-studio/dist/public/index.html")) return 4;
+        if (path.endsWith("cynthia-organism-browser/index.html")) return 5;
+        if (path.endsWith("synthia-complete-system/index.html")) return 6;
+        if (path.endsWith("messy-modern/messy_modern.html")) return 7;
+        if (path.endsWith("resonance-body.html")) return 8;
+        if (path.endsWith("graph-center.html")) return 9;
+        return 100;
+    }
+
+    private String pageLabel(String path) {
+        switch (pagePriority(path)) {
+            case 0: return "Stellar Proximology — main interface";
+            case 1: return "Synthia OS — preserved shell";
+            case 2: return "SynthAI Suite Center";
+            case 3: return "Synthia — cultivation ground";
+            case 4: return "YOU–N–I–VERSE Studio";
+            case 5: return "Synthia Consciousness Engine";
+            case 6: return "Synthia Kiosk";
+            case 7: return "MESSY Modern";
+            case 8: return "Resonance Body";
+            case 9: return "Graph Center";
+            default: return path.substring("web/".length());
+        }
+    }
+
+    private void showCatalog() {
+        if (archive == null || catalogPaths.isEmpty()) {
+            new AlertDialog.Builder(this).setMessage("Archive is loading.")
+                .setPositiveButton("Close", null).show();
+            return;
+        }
+        String[] choices = new String[catalogPaths.size()];
+        for (int i = 0; i < choices.length; i++) {
+            String path = catalogPaths.get(i);
+            choices[i] = pageLabel(path) + "\\n" + path;
+        }
+        new AlertDialog.Builder(this)
+            .setTitle("Original archive — " + choices.length + " interfaces")
+            .setItems(choices, (dialog, which) -> {
+                webView.loadUrl("https://appassets.androidplatform.net/assets/" +
+                    catalogPaths.get(which));
+            })
+            .setNegativeButton("Close", null)
+            .show();
     }
 
     private ZipFile prepareArchive() throws IOException {
