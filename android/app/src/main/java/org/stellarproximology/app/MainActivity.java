@@ -5,25 +5,37 @@ import android.content.Intent;
 import android.graphics.Color;
 import android.net.Uri;
 import android.os.Bundle;
+import android.util.Log;
+import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebResourceResponse;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
-import android.webkit.ValueCallback;
 import androidx.webkit.ServiceWorkerClientCompat;
 import androidx.webkit.ServiceWorkerControllerCompat;
 import androidx.webkit.WebViewAssetLoader;
 import androidx.webkit.WebViewFeature;
+import java.io.File;
+import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.Locale;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipFile;
 
 public class MainActivity extends Activity {
     private static final String START_URL =
-            "https://appassets.androidplatform.net/assets/web/index.html";
+        "https://appassets.androidplatform.net/assets/web/index.html";
+    private static final String ASSET_NAME = "stellar-source.zip";
+    private static final String SOURCE_SHA256 =
+        "503f7ca959767d531b528b89ac21b7761afa8fba1c6e1ffb9e3c41835df4a0aa";
+    private static final long SOURCE_LENGTH = 92476071L;
     private static final int FILE_PICKER_CODE = 101;
+    private volatile ZipFile archive;
     private WebView webView;
     private ValueCallback<Uri[]> pendingFiles;
 
@@ -33,9 +45,8 @@ public class MainActivity extends Activity {
         getWindow().setStatusBarColor(Color.rgb(8, 7, 11));
         getWindow().setNavigationBarColor(Color.rgb(8, 7, 11));
 
-        WebViewAssetLoader loader = new WebViewAssetLoader.Builder()
-            .addPathHandler("/assets/", new WebAssets())
-            .build();
+        final WebViewAssetLoader loader = new WebViewAssetLoader.Builder()
+            .addPathHandler("/assets/", new ArchiveAssets()).build();
 
         if (WebViewFeature.isFeatureSupported(WebViewFeature.SERVICE_WORKER_BASIC_USAGE)) {
             ServiceWorkerControllerCompat.getInstance().setServiceWorkerClient(
@@ -49,6 +60,7 @@ public class MainActivity extends Activity {
         }
 
         webView = new WebView(this);
+        webView.setBackgroundColor(Color.rgb(8, 7, 11));
         WebSettings settings = webView.getSettings();
         settings.setJavaScriptEnabled(true);
         settings.setDomStorageEnabled(true);
@@ -80,14 +92,89 @@ public class MainActivity extends Activity {
             }
         });
         setContentView(webView);
-        if (state == null) webView.loadUrl(START_URL);
-        else webView.restoreState(state);
+
+        // Opening the original ZIP on a worker thread avoids blocking the app UI.
+        new Thread(() -> {
+            try {
+                ZipFile opened = prepareArchive();
+                archive = opened;
+                runOnUiThread(() -> {
+                    if (isFinishing() || isDestroyed()) return;
+                    if (state != null && webView.restoreState(state) != null) return;
+                    webView.loadUrl(START_URL);
+                });
+            } catch (Exception e) {
+                Log.e("StellarProximology", "Original archive unavailable", e);
+                runOnUiThread(() -> {
+                    if (!isFinishing() && !isDestroyed()) {
+                        webView.loadData("<h3>Could not open the local app archive.</h3>",
+                                         "text/html", "UTF-8");
+                    }
+                });
+            }
+        }, "StellarArchiveBootstrap").start();
+    }
+
+    private ZipFile prepareArchive() throws IOException {
+        File target = new File(getFilesDir(), ASSET_NAME);
+        if (!target.isFile() || target.length() != SOURCE_LENGTH) {
+            File temporary = new File(getFilesDir(), ASSET_NAME + ".tmp");
+            try {
+                MessageDigest digest = MessageDigest.getInstance("SHA-256");
+                byte[] block = new byte[1024 * 128];
+                try (InputStream input = getAssets().open(ASSET_NAME);
+                     FileOutputStream output = new FileOutputStream(temporary)) {
+                    int count;
+                    while ((count = input.read(block)) != -1) {
+                        digest.update(block, 0, count);
+                        output.write(block, 0, count);
+                    }
+                }
+                StringBuilder hex = new StringBuilder();
+                for (byte b : digest.digest()) {
+                    hex.append(String.format(Locale.ROOT, "%02x", b & 0xff));
+                }
+                if (temporary.length() != SOURCE_LENGTH ||
+                    !SOURCE_SHA256.equals(hex.toString())) {
+                    throw new IOException("Bundled ZIP failed source integrity verification");
+                }
+                if (target.exists() && !target.delete()) {
+                    throw new IOException("Could not replace old local archive");
+                }
+                if (!temporary.renameTo(target)) {
+                    throw new IOException("Could not install verified local archive");
+                }
+            } catch (NoSuchAlgorithmException e) {
+                throw new IOException("SHA-256 unavailable", e);
+            } finally {
+                temporary.delete();
+            }
+        }
+        return new ZipFile(target);
+    }
+
+    private final class ArchiveAssets implements WebViewAssetLoader.PathHandler {
+        @Override
+        public WebResourceResponse handle(String path) {
+            ZipFile current = archive;
+            if (current == null || path == null || path.startsWith("/") ||
+                path.contains("..")) return null;
+            try {
+                ZipEntry item = current.getEntry("assets/" + path);
+                if (item == null || item.isDirectory()) return null;
+                String mime = typeFor(path.toLowerCase(Locale.ROOT));
+                String encoding = isText(mime) ? "UTF-8" : null;
+                return new WebResourceResponse(mime, encoding, current.getInputStream(item));
+            } catch (IOException e) {
+                return null;
+            }
+        }
     }
 
     @Override
-    protected void onActivityResult(int req, int result, Intent intent) {
-        super.onActivityResult(req, result, intent);
-        if (req == FILE_PICKER_CODE && pendingFiles != null) {
+    protected void onActivityResult(int request, int result, Intent intent) {
+        super.onActivityResult(request, result, intent);
+        if (request == FILE_PICKER_CODE && pendingFiles != null) {
             pendingFiles.onReceiveValue(
                 WebChromeClient.FileChooserParams.parseResult(result, intent));
             pendingFiles = null;
@@ -110,24 +197,11 @@ public class MainActivity extends Activity {
     protected void onDestroy() {
         if (pendingFiles != null) pendingFiles.onReceiveValue(null);
         if (webView != null) webView.destroy();
-        super.onDestroy();
-    }
-
-    // Asset URLs keep the web app's relative URLs and ES module imports intact.
-    private final class WebAssets implements WebViewAssetLoader.PathHandler {
-        @Override
-        public WebResourceResponse handle(String path) {
-            if (path == null || path.startsWith("/") || path.contains("..")) return null;
-            try {
-                InputStream bytes = getAssets().open(path);
-                String p = path.toLowerCase(Locale.ROOT);
-                String mime = typeFor(p);
-                String encoding = isText(mime) ? "UTF-8" : null;
-                return new WebResourceResponse(mime, encoding, bytes);
-            } catch (IOException e) {
-                return null;
-            }
+        ZipFile current = archive;
+        if (current != null) {
+            try { current.close(); } catch (IOException ignored) { }
         }
+        super.onDestroy();
     }
 
     private static boolean isText(String type) {
